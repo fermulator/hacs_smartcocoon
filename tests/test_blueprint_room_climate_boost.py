@@ -1,10 +1,13 @@
 """Characterization tests for the Room Climate Boost blueprint.
 
-These lock in the blueprint's *current* behavior as an executable spec, so the
-symmetric-heating refactor can proceed without silently regressing cooling. Each
-test instantiates the real blueprint as an automation (HA core's blueprint test
+These lock in the blueprint's behavior as an executable spec. Each scenario
+instantiates the real blueprint as an automation (HA core's blueprint test
 pattern), drives entity states, and asserts the ``fan.set_percentage`` the
-automation commands.
+automation commands (or that it stays silent).
+
+Almost every case is the same shape -- set the world, fire a trigger, assert the
+commanded speed -- so they are expressed as one data-driven, parametrized test
+over ``_SCENARIOS`` rather than ~30 near-identical functions.
 
 The blueprint is YAML, so it does not move the ``custom_components`` coverage
 number -- these tests gate correctness, not coverage.
@@ -115,6 +118,25 @@ def _last_pct(calls: list[ServiceCall]) -> int:
     return int(calls[-1].data["percentage"])
 
 
+async def _run_scenario(
+    hass: HomeAssistant,
+    calls: list[ServiceCall],
+    freezer: FrozenDateTimeFactory,
+    case: dict[str, Any],
+) -> None:
+    """Set up (with any per-case inputs), trigger, and assert the outcome.
+
+    ``expected`` is the commanded percentage, or None to assert no command.
+    """
+    await _setup(hass, case.get("inputs"))
+    await _trigger(hass, calls, freezer, **case["trigger"])
+    expected = case["expected"]
+    if expected is None:
+        assert len(calls) == 0, f"expected no command, got {calls}"
+    else:
+        assert _last_pct(calls) == expected
+
+
 # --------------------------------------------------------------------------- #
 # Smoke: the blueprint is a valid, loadable blueprint.
 # --------------------------------------------------------------------------- #
@@ -129,454 +151,408 @@ async def test_blueprint_instantiates(hass: HomeAssistant) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Cooling tier ladder.
+# Behavior matrix. Each case: optional setup `inputs`, the `trigger` state, and
+# the `expected` commanded percentage (None = no command). Defaults: boost=100,
+# circulate=60, assist=17, baseline=8, boost_threshold=1.0, release=0.3.
 # --------------------------------------------------------------------------- #
-async def test_cooling_boost(
-    hass: HomeAssistant, calls: list[ServiceCall], freezer: FrozenDateTimeFactory
-) -> None:
-    """Actively cooling and >= boost threshold over setpoint -> boost (100)."""
-    await _setup(hass)
-    await _trigger(
-        hass, calls, freezer, hvac_action="cooling", target_temp_high=22.0, room=24.0
-    )
-    assert _last_pct(calls) == 100
+_SCENARIOS = [
+    # --- cooling tier ladder ---
+    pytest.param(
+        {
+            "trigger": {
+                "hvac_action": "cooling",
+                "target_temp_high": 22.0,
+                "room": 24.0,
+            },
+            "expected": 100,
+        },
+        id="cooling-boost",
+    ),
+    pytest.param(
+        {
+            "trigger": {
+                "hvac_action": "cooling",
+                "target_temp_high": 22.0,
+                "room": 22.5,
+            },
+            "expected": 17,
+        },
+        id="cooling-assist-daytime",
+    ),
+    pytest.param(
+        {
+            "trigger": {"hvac_action": "fan", "target_temp_high": 22.0, "room": 24.0},
+            "expected": 60,
+        },
+        id="fan-only-circulate-cooling",
+    ),
+    pytest.param(
+        {
+            "trigger": {"hvac_action": "idle", "target_temp_high": 22.0, "room": 20.0},
+            "expected": 8,
+        },
+        id="baseline-when-idle",
+    ),
+    # --- heating tier ladder (symmetric) ---
+    pytest.param(
+        {
+            "trigger": {
+                "mode": "heat",
+                "hvac_action": "heating",
+                "target_temp_low": 21.0,
+                "room": 19.0,
+            },
+            "expected": 100,
+        },
+        id="heating-boost",
+    ),
+    pytest.param(
+        {
+            "trigger": {
+                "mode": "heat",
+                "hvac_action": "heating",
+                "target_temp_low": 21.0,
+                "room": 20.5,
+            },
+            "expected": 17,
+        },
+        id="heating-assist-daytime",
+    ),
+    pytest.param(
+        {
+            "trigger": {
+                "mode": "heat",
+                "hvac_action": "fan",
+                "target_temp_low": 21.0,
+                "room": 19.0,
+            },
+            "expected": 60,
+        },
+        id="fan-only-circulate-heating",
+    ),
+    # --- HVAC-off equalizer, bidirectional (tiers on |room - house|) ---
+    pytest.param(
+        {
+            "trigger": {
+                "mode": "fan_only",
+                "hvac_action": "fan",
+                "current_temperature": 22.0,
+                "room": 24.1,
+            },
+            "expected": 100,
+        },
+        id="equalizer-warm-2.1",
+    ),
+    pytest.param(
+        {
+            "trigger": {
+                "mode": "fan_only",
+                "hvac_action": "fan",
+                "current_temperature": 22.0,
+                "room": 23.2,
+            },
+            "expected": 60,
+        },
+        id="equalizer-warm-1.2",
+    ),
+    pytest.param(
+        {
+            "trigger": {
+                "mode": "fan_only",
+                "hvac_action": "fan",
+                "current_temperature": 22.0,
+                "room": 22.6,
+            },
+            "expected": 33,
+        },
+        id="equalizer-warm-0.6",
+    ),
+    pytest.param(
+        {
+            "trigger": {
+                "mode": "fan_only",
+                "hvac_action": "fan",
+                "current_temperature": 22.0,
+                "room": 22.2,
+            },
+            "expected": 8,
+        },
+        id="equalizer-warm-0.2",
+    ),
+    pytest.param(
+        {
+            "trigger": {
+                "mode": "fan_only",
+                "hvac_action": "fan",
+                "current_temperature": 22.0,
+                "room": 19.9,
+            },
+            "expected": 100,
+        },
+        id="equalizer-cold-2.1",
+    ),
+    pytest.param(
+        {
+            "trigger": {
+                "mode": "fan_only",
+                "hvac_action": "fan",
+                "current_temperature": 22.0,
+                "room": 20.8,
+            },
+            "expected": 60,
+        },
+        id="equalizer-cold-1.2",
+    ),
+    pytest.param(
+        {
+            "trigger": {
+                "mode": "fan_only",
+                "hvac_action": "fan",
+                "current_temperature": 22.0,
+                "room": 21.4,
+            },
+            "expected": 33,
+        },
+        id="equalizer-cold-0.6",
+    ),
+    pytest.param(
+        {
+            "trigger": {
+                "mode": "fan_only",
+                "hvac_action": "fan",
+                "current_temperature": 22.0,
+                "room": 21.8,
+            },
+            "expected": 8,
+        },
+        id="equalizer-cold-0.2",
+    ),
+    # --- night suppression ---
+    pytest.param(
+        {
+            "trigger": {
+                "when": _NIGHT,
+                "hvac_action": "cooling",
+                "target_temp_high": 22.0,
+                "room": 22.5,
+            },
+            "expected": 8,
+        },
+        id="night-suppresses-cooling-assist",
+    ),
+    pytest.param(
+        {
+            "trigger": {
+                "when": _NIGHT,
+                "hvac_action": "fan",
+                "target_temp_high": 22.0,
+                "room": 24.0,
+            },
+            "expected": 8,
+        },
+        id="night-suppresses-fan-circulate",
+    ),
+    pytest.param(
+        {
+            "trigger": {
+                "when": _NIGHT,
+                "hvac_action": "cooling",
+                "target_temp_high": 22.0,
+                "room": 24.0,
+            },
+            "expected": 100,
+        },
+        id="night-still-allows-cooling-boost",
+    ),
+    pytest.param(
+        {
+            "trigger": {
+                "when": _NIGHT,
+                "mode": "heat",
+                "hvac_action": "heating",
+                "target_temp_low": 21.0,
+                "room": 19.0,
+            },
+            "expected": 100,
+        },
+        id="night-still-allows-heating-boost",
+    ),
+    pytest.param(
+        {
+            "trigger": {
+                "when": _NIGHT,
+                "mode": "heat",
+                "hvac_action": "heating",
+                "target_temp_low": 21.0,
+                "room": 20.5,
+            },
+            "expected": 8,
+        },
+        id="night-suppresses-heating-assist",
+    ),
+    # --- caps and floor ---
+    pytest.param(
+        {
+            "inputs": {"night_max_speed": 8},
+            "trigger": {
+                "when": _NIGHT,
+                "hvac_action": "cooling",
+                "target_temp_high": 22.0,
+                "room": 24.0,
+            },
+            "expected": 8,
+        },
+        id="night-max-cap",
+    ),
+    pytest.param(
+        {
+            "inputs": {"max_speed": 60},
+            "trigger": {
+                "hvac_action": "cooling",
+                "target_temp_high": 22.0,
+                "room": 24.0,
+            },
+            "expected": 60,
+        },
+        id="max-speed-cap",
+    ),
+    pytest.param(
+        {
+            "inputs": {"speed_floor_entity": "input_number.floor"},
+            "trigger": {
+                "hvac_action": "idle",
+                "target_temp_high": 22.0,
+                "room": 20.0,
+                "helpers": {"input_number.floor": "40"},
+            },
+            "expected": 40,
+        },
+        id="speed-floor",
+    ),
+    # --- force-max override and manual-off handling ---
+    pytest.param(
+        {
+            "inputs": {"force_max_boolean": "input_boolean.max"},
+            "trigger": {
+                "hvac_action": "idle",
+                "target_temp_high": 22.0,
+                "room": 20.0,
+                "helpers": {"input_boolean.max": "on"},
+            },
+            "expected": 100,
+        },
+        id="force-max-overrides-everything",
+    ),
+    pytest.param(
+        {
+            "trigger": {
+                "hvac_action": "cooling",
+                "target_temp_high": 22.0,
+                "room": 24.0,
+                "fan_state": "off",
+            },
+            "expected": None,
+        },
+        id="manual-off-respected",
+    ),
+    pytest.param(
+        {
+            "inputs": {"force_manage": True},
+            "trigger": {
+                "hvac_action": "idle",
+                "target_temp_high": 22.0,
+                "room": 20.0,
+                "fan_state": "off",
+            },
+            "expected": 8,
+        },
+        id="force-manage-ignores-manual-off",
+    ),
+    # --- sticky release hysteresis ---
+    pytest.param(
+        {
+            "trigger": {
+                "hvac_action": "cooling",
+                "target_temp_high": 22.0,
+                "room": 22.5,
+                "fan_pct": 50,
+            },
+            "expected": 17,
+        },
+        id="no-premature-boost-below-threshold",
+    ),
+    pytest.param(
+        {
+            "trigger": {
+                "hvac_action": "cooling",
+                "target_temp_high": 22.0,
+                "room": 22.5,
+                "fan_pct": 98,
+            },
+            "expected": None,
+        },
+        id="sticky-holds-high-within-band",
+    ),
+    pytest.param(
+        {
+            "trigger": {
+                "hvac_action": "cooling",
+                "target_temp_high": 22.0,
+                "room": 22.2,
+                "fan_pct": 98,
+            },
+            "expected": 17,
+        },
+        id="release-steps-down-below-release-threshold",
+    ),
+    # --- enable toggles gate each direction ---
+    pytest.param(
+        {
+            "inputs": {"enable_cooling": False},
+            "trigger": {
+                "hvac_action": "cooling",
+                "target_temp_high": 22.0,
+                "room": 24.0,
+            },
+            "expected": 8,
+        },
+        id="enable-cooling-false-leaves-baseline",
+    ),
+    pytest.param(
+        {
+            "inputs": {"enable_heating": False},
+            "trigger": {
+                "mode": "heat",
+                "hvac_action": "heating",
+                "target_temp_low": 21.0,
+                "room": 19.0,
+            },
+            "expected": 8,
+        },
+        id="enable-heating-false-leaves-baseline",
+    ),
+    # --- re-command threshold ---
+    pytest.param(
+        {
+            "trigger": {
+                "hvac_action": "cooling",
+                "target_temp_high": 22.0,
+                "room": 24.0,
+                "fan_pct": 97,
+            },
+            "expected": None,
+        },
+        id="no-recommand-within-threshold",
+    ),
+]
 
 
-async def test_cooling_assist_daytime(
-    hass: HomeAssistant, calls: list[ServiceCall], freezer: FrozenDateTimeFactory
-) -> None:
-    """Cooling within threshold, daytime -> assist (17)."""
-    await _setup(hass)
-    await _trigger(
-        hass, calls, freezer, hvac_action="cooling", target_temp_high=22.0, room=22.5
-    )
-    assert _last_pct(calls) == 17
-
-
-async def test_fan_only_circulate_daytime(
-    hass: HomeAssistant, calls: list[ServiceCall], freezer: FrozenDateTimeFactory
-) -> None:
-    """Fan-only (blower on, AC idle), room over setpoint -> circulate (60)."""
-    await _setup(hass)
-    await _trigger(
-        hass, calls, freezer, hvac_action="fan", target_temp_high=22.0, room=24.0
-    )
-    assert _last_pct(calls) == 60
-
-
-async def test_baseline_when_idle(
-    hass: HomeAssistant, calls: list[ServiceCall], freezer: FrozenDateTimeFactory
-) -> None:
-    """Idle, room below setpoint -> baseline whisper (8)."""
-    await _setup(hass)
-    await _trigger(
-        hass, calls, freezer, hvac_action="idle", target_temp_high=22.0, room=20.0
-    )
-    assert _last_pct(calls) == 8
-
-
-# --------------------------------------------------------------------------- #
-# HVAC-off equalizer (currently one-directional: only when room warmer than house).
-# --------------------------------------------------------------------------- #
-@pytest.mark.parametrize(  # type: ignore[untyped-decorator]
-    ("room", "expected"),
-    [(24.1, 100), (23.2, 60), (22.6, 33), (22.2, 8)],
-)
-async def test_equalizer_tiers(
+@pytest.mark.parametrize("case", _SCENARIOS)  # type: ignore[untyped-decorator]
+async def test_speed_scenario(
     hass: HomeAssistant,
     calls: list[ServiceCall],
     freezer: FrozenDateTimeFactory,
-    room: float,
-    expected: int,
+    case: dict[str, Any],
 ) -> None:
-    """No cool setpoint, blower circulating, home: equalize toward house temp."""
-    await _setup(hass)
-    await _trigger(
-        hass,
-        calls,
-        freezer,
-        mode="fan_only",  # not 'cool' and no target_temp_high => cool_sp is None
-        hvac_action="fan",
-        current_temperature=22.0,  # house reference
-        room=room,
-    )
-    assert _last_pct(calls) == expected
-
-
-# --------------------------------------------------------------------------- #
-# Night suppression.
-# --------------------------------------------------------------------------- #
-async def test_night_suppresses_cooling_assist(
-    hass: HomeAssistant, calls: list[ServiceCall], freezer: FrozenDateTimeFactory
-) -> None:
-    """At night, cooling-within-threshold collapses to baseline."""
-    await _setup(hass)
-    await _trigger(
-        hass,
-        calls,
-        freezer,
-        when=_NIGHT,
-        hvac_action="cooling",
-        target_temp_high=22.0,
-        room=22.5,
-    )
-    assert _last_pct(calls) == 8
-
-
-async def test_night_suppresses_fan_circulate(
-    hass: HomeAssistant, calls: list[ServiceCall], freezer: FrozenDateTimeFactory
-) -> None:
-    """At night, fan-only circulate collapses to baseline."""
-    await _setup(hass)
-    await _trigger(
-        hass,
-        calls,
-        freezer,
-        when=_NIGHT,
-        hvac_action="fan",
-        target_temp_high=22.0,
-        room=24.0,
-    )
-    assert _last_pct(calls) == 8
-
-
-async def test_night_still_allows_cooling_boost(
-    hass: HomeAssistant, calls: list[ServiceCall], freezer: FrozenDateTimeFactory
-) -> None:
-    """At night, an active-cooling boost is still allowed (not night-gated)."""
-    await _setup(hass)
-    await _trigger(
-        hass,
-        calls,
-        freezer,
-        when=_NIGHT,
-        hvac_action="cooling",
-        target_temp_high=22.0,
-        room=24.0,
-    )
-    assert _last_pct(calls) == 100
-
-
-# --------------------------------------------------------------------------- #
-# Caps and floor.
-# --------------------------------------------------------------------------- #
-async def test_night_max_cap(
-    hass: HomeAssistant, calls: list[ServiceCall], freezer: FrozenDateTimeFactory
-) -> None:
-    """night_max_speed caps an otherwise-100 boost during the night window."""
-    await _setup(hass, {"night_max_speed": 8})
-    await _trigger(
-        hass,
-        calls,
-        freezer,
-        when=_NIGHT,
-        hvac_action="cooling",
-        target_temp_high=22.0,
-        room=24.0,
-    )
-    assert _last_pct(calls) == 8
-
-
-async def test_max_speed_cap(
-    hass: HomeAssistant, calls: list[ServiceCall], freezer: FrozenDateTimeFactory
-) -> None:
-    """max_speed caps the normal automatic speed."""
-    await _setup(hass, {"max_speed": 60})
-    await _trigger(
-        hass, calls, freezer, hvac_action="cooling", target_temp_high=22.0, room=24.0
-    )
-    assert _last_pct(calls) == 60
-
-
-async def test_speed_floor(
-    hass: HomeAssistant, calls: list[ServiceCall], freezer: FrozenDateTimeFactory
-) -> None:
-    """An external speed floor raises an otherwise-baseline speed."""
-    await _setup(hass, {"speed_floor_entity": "input_number.floor"})
-    await _trigger(
-        hass,
-        calls,
-        freezer,
-        hvac_action="idle",
-        target_temp_high=22.0,
-        room=20.0,
-        helpers={"input_number.floor": "40"},
-    )
-    assert _last_pct(calls) == 40
-
-
-# --------------------------------------------------------------------------- #
-# Force-max override and manual-off handling.
-# --------------------------------------------------------------------------- #
-async def test_force_max_overrides_everything(
-    hass: HomeAssistant, calls: list[ServiceCall], freezer: FrozenDateTimeFactory
-) -> None:
-    """force_max boolean ON -> 100 regardless of an otherwise-idle state."""
-    await _setup(hass, {"force_max_boolean": "input_boolean.max"})
-    await _trigger(
-        hass,
-        calls,
-        freezer,
-        hvac_action="idle",
-        target_temp_high=22.0,
-        room=20.0,
-        helpers={"input_boolean.max": "on"},
-    )
-    assert _last_pct(calls) == 100
-
-
-async def test_manual_off_respected(
-    hass: HomeAssistant, calls: list[ServiceCall], freezer: FrozenDateTimeFactory
-) -> None:
-    """A manually-off fan is left alone (no command) without a force flag."""
-    await _setup(hass)
-    await _trigger(
-        hass,
-        calls,
-        freezer,
-        hvac_action="cooling",
-        target_temp_high=22.0,
-        room=24.0,
-        fan_state="off",
-    )
-    assert len(calls) == 0
-
-
-async def test_force_manage_ignores_manual_off(
-    hass: HomeAssistant, calls: list[ServiceCall], freezer: FrozenDateTimeFactory
-) -> None:
-    """force_manage ON commands even a manually-off fan."""
-    await _setup(hass, {"force_manage": True})
-    await _trigger(
-        hass,
-        calls,
-        freezer,
-        hvac_action="idle",
-        target_temp_high=22.0,
-        room=20.0,
-        fan_state="off",
-    )
-    assert _last_pct(calls) == 8
-
-
-# --------------------------------------------------------------------------- #
-# Sticky release hysteresis.
-# --------------------------------------------------------------------------- #
-async def test_no_premature_boost_below_threshold(
-    hass: HomeAssistant, calls: list[ServiceCall], freezer: FrozenDateTimeFactory
-) -> None:
-    """Not-yet-high + mid-band delta -> assist, not a premature boost."""
-    await _setup(hass)
-    await _trigger(
-        hass,
-        calls,
-        freezer,
-        hvac_action="cooling",
-        target_temp_high=22.0,
-        room=22.5,  # delta 0.5, below boost threshold 1.0
-        fan_pct=50,  # not currently high
-    )
-    assert _last_pct(calls) == 17
-
-
-async def test_sticky_holds_high_within_band(
-    hass: HomeAssistant, calls: list[ServiceCall], freezer: FrozenDateTimeFactory
-) -> None:
-    """Currently-high + delta still above release -> stays 100 (no re-command)."""
-    await _setup(hass)
-    await _trigger(
-        hass,
-        calls,
-        freezer,
-        hvac_action="cooling",
-        target_temp_high=22.0,
-        room=22.5,  # delta 0.5 > release 0.3
-        fan_pct=98,  # currently high; desired stays 100, within 4% -> no call
-    )
-    assert len(calls) == 0
-
-
-async def test_release_steps_down_below_release_threshold(
-    hass: HomeAssistant, calls: list[ServiceCall], freezer: FrozenDateTimeFactory
-) -> None:
-    """Currently-high + delta below release threshold -> steps down to assist."""
-    await _setup(hass)
-    await _trigger(
-        hass,
-        calls,
-        freezer,
-        hvac_action="cooling",
-        target_temp_high=22.0,
-        room=22.2,  # delta 0.2 < release 0.3
-        fan_pct=98,  # currently high
-    )
-    assert _last_pct(calls) == 17
-
-
-# --------------------------------------------------------------------------- #
-# Heating tier ladder (symmetric with cooling).
-# --------------------------------------------------------------------------- #
-async def test_heating_boost(
-    hass: HomeAssistant, calls: list[ServiceCall], freezer: FrozenDateTimeFactory
-) -> None:
-    """Actively heating and >= boost threshold below setpoint -> boost (100)."""
-    await _setup(hass)
-    await _trigger(
-        hass,
-        calls,
-        freezer,
-        mode="heat",
-        hvac_action="heating",
-        target_temp_low=21.0,
-        room=19.0,  # 2.0 below heat setpoint
-    )
-    assert _last_pct(calls) == 100
-
-
-async def test_heating_assist_daytime(
-    hass: HomeAssistant, calls: list[ServiceCall], freezer: FrozenDateTimeFactory
-) -> None:
-    """Heating within threshold, daytime -> assist (17)."""
-    await _setup(hass)
-    await _trigger(
-        hass,
-        calls,
-        freezer,
-        mode="heat",
-        hvac_action="heating",
-        target_temp_low=21.0,
-        room=20.5,  # 0.5 below setpoint, within boost threshold
-    )
-    assert _last_pct(calls) == 17
-
-
-async def test_fan_only_circulate_heating(
-    hass: HomeAssistant, calls: list[ServiceCall], freezer: FrozenDateTimeFactory
-) -> None:
-    """Fan-only, room below heat setpoint -> circulate (60)."""
-    await _setup(hass)
-    await _trigger(
-        hass,
-        calls,
-        freezer,
-        mode="heat",  # cool_sp is None; heat_sp comes from target_temp_low
-        hvac_action="fan",
-        target_temp_low=21.0,
-        room=19.0,
-    )
-    assert _last_pct(calls) == 60
-
-
-async def test_night_still_allows_heating_boost(
-    hass: HomeAssistant, calls: list[ServiceCall], freezer: FrozenDateTimeFactory
-) -> None:
-    """At night, an active-heating boost is still allowed."""
-    await _setup(hass)
-    await _trigger(
-        hass,
-        calls,
-        freezer,
-        when=_NIGHT,
-        mode="heat",
-        hvac_action="heating",
-        target_temp_low=21.0,
-        room=19.0,
-    )
-    assert _last_pct(calls) == 100
-
-
-async def test_night_suppresses_heating_assist(
-    hass: HomeAssistant, calls: list[ServiceCall], freezer: FrozenDateTimeFactory
-) -> None:
-    """At night, heating-within-threshold collapses to baseline."""
-    await _setup(hass)
-    await _trigger(
-        hass,
-        calls,
-        freezer,
-        when=_NIGHT,
-        mode="heat",
-        hvac_action="heating",
-        target_temp_low=21.0,
-        room=20.5,
-    )
-    assert _last_pct(calls) == 8
-
-
-# --------------------------------------------------------------------------- #
-# Bidirectional equalizer: room COLDER than the house pulls warm air in too.
-# --------------------------------------------------------------------------- #
-@pytest.mark.parametrize(  # type: ignore[untyped-decorator]
-    ("room", "expected"),
-    [(19.9, 100), (20.8, 60), (21.4, 33), (21.8, 8)],
-)
-async def test_equalizer_tiers_room_colder_than_house(
-    hass: HomeAssistant,
-    calls: list[ServiceCall],
-    freezer: FrozenDateTimeFactory,
-    room: float,
-    expected: int,
-) -> None:
-    """No setpoint, blower circulating, home: equalize a cold room toward the house."""
-    await _setup(hass)
-    await _trigger(
-        hass,
-        calls,
-        freezer,
-        mode="fan_only",
-        hvac_action="fan",
-        current_temperature=22.0,  # house is warmer than the room
-        room=room,
-    )
-    assert _last_pct(calls) == expected
-
-
-# --------------------------------------------------------------------------- #
-# Enable toggles gate each direction.
-# --------------------------------------------------------------------------- #
-async def test_enable_cooling_false_leaves_baseline(
-    hass: HomeAssistant, calls: list[ServiceCall], freezer: FrozenDateTimeFactory
-) -> None:
-    """With cooling management off, an otherwise-boost case stays at baseline."""
-    await _setup(hass, {"enable_cooling": False})
-    await _trigger(
-        hass, calls, freezer, hvac_action="cooling", target_temp_high=22.0, room=24.0
-    )
-    assert _last_pct(calls) == 8
-
-
-async def test_enable_heating_false_leaves_baseline(
-    hass: HomeAssistant, calls: list[ServiceCall], freezer: FrozenDateTimeFactory
-) -> None:
-    """With heating management off, an otherwise-boost case stays at baseline."""
-    await _setup(hass, {"enable_heating": False})
-    await _trigger(
-        hass,
-        calls,
-        freezer,
-        mode="heat",
-        hvac_action="heating",
-        target_temp_low=21.0,
-        room=19.0,
-    )
-    assert _last_pct(calls) == 8
-
-
-# --------------------------------------------------------------------------- #
-# Re-command threshold.
-# --------------------------------------------------------------------------- #
-async def test_no_recommand_within_threshold(
-    hass: HomeAssistant, calls: list[ServiceCall], freezer: FrozenDateTimeFactory
-) -> None:
-    """No command when current speed is within one step (<=4%) of desired."""
-    await _setup(hass)
-    await _trigger(
-        hass,
-        calls,
-        freezer,
-        hvac_action="cooling",
-        target_temp_high=22.0,
-        room=24.0,  # desired 100
-        fan_pct=97,  # within 4% of 100
-    )
-    assert len(calls) == 0
+    """Drive the blueprint through one scenario and assert the commanded speed."""
+    await _run_scenario(hass, calls, freezer, case)
