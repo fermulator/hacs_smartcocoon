@@ -335,7 +335,9 @@ use_blueprint:
 
 - **Whole-house MAX switch** — create an `input_boolean` (e.g.
   `input_boolean.vent_fans_max`) and point every room's **Force-MAX boolean** input at
-  it. Flip it on to blast every fan to 100%.
+  it. Flip it on to blast every fan to 100%. The blueprint responds **instantly on both
+  edges** (dedicated template triggers), so a dashboard toggle, voice intent, or scene
+  blasts immediately and reclaims control the moment it's turned off.
 - **Speed floor / pre-cool ramp** — create an `input_number` (0–100) and set it as each
   room's **External speed floor**. An external automation (e.g. a sunrise pre-cool) can
   raise the floor without fighting the blueprint — the blueprint stays the sole writer and
@@ -365,17 +367,42 @@ use_blueprint:
             value: 0
   ```
 
+- **Standalone instant-MAX (no blueprint needed)** — if you _aren't_ using the blueprint
+  but still want a "blast all vents" switch, a small automation on a [fan group](#a-fan-group-control-all-vents-at-once)
+  does it:
+
+  ```yaml
+  automation:
+    - alias: "Vent fans — instant MAX"
+      trigger:
+        - platform: state
+          entity_id: input_boolean.vent_fans_max
+          to: "on"
+      action:
+        - service: fan.set_percentage
+          target:
+            entity_id: fan.all_vents
+          data:
+            percentage: 100
+  ```
+
+  With the blueprint, you don't need this — its Force-MAX input already gives instant MAX
+  on both edges. Standalone, note the OFF edge: this recipe only sets 100 on the ON edge,
+  so add a matching `to: "off"` trigger that restores your normal speed if you want the
+  fans to drop back automatically.
+
 ---
 
 ## Caveats
 
 - **Be the sole writer.** The integration doesn't see app-side changes, so let one
   automation own each fan's speed. Mixing the app and HA causes them to fight.
-- **Optional inputs aren't triggers.** The Force-MAX boolean and the external speed
-  floor are optional inputs, so they can't be automation triggers (an unset optional
-  trigger entity makes a blueprint fail to load). Changes to them are picked up on the
-  next re-evaluation — a room/thermostat state change or the periodic tick — **within
-  ~10 minutes**. If you need instant response, drive the fan directly for that one action.
+- **The external speed floor isn't a trigger.** An optional input can't be a state-trigger
+  entity_id (an unset one would make the blueprint fail to load), so a change to the speed
+  floor is picked up on the next re-evaluation — a room/thermostat state change or the
+  periodic tick — **within ~10 minutes**. (The Force-MAX boolean is exempt: it gets
+  dedicated template triggers, so it responds instantly.) If you need an instant floor
+  change, drive the fan directly for that one action.
 - **Night caps.** With night suppression on, the assist/circulate/equalize tiers collapse
   to baseline overnight; only an active heating/cooling boost may exceed baseline. Set
   `night_max_speed` low to prevent a nighttime boost from waking a bedroom.

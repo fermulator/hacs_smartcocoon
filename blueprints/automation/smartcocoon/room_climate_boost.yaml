@@ -264,9 +264,9 @@ blueprint:
         to 100%, short-circuiting ALL other logic (night suppression, equalizer,
         cooling tiers) AND overriding even a manually-OFF fan ("MAX = everything
         on"). Point every room's instance at the same helper for one whole-house
-        blast switch. NOTE: because it is optional it is NOT a trigger — a change
-        is picked up on the next re-evaluation (room/thermostat change or the
-        periodic tick, within ~10 min).
+        blast switch. Responds instantly on both edges (dedicated template
+        triggers), so a dashboard toggle / voice intent / scene blasts to 100 and
+        reclaims control the moment it is turned off.
       default:
       selector:
         entity:
@@ -417,7 +417,24 @@ variables:
   final_speed: >-
     {% if force_max %}100{% else %}{% set cap = [ max_speed, (night_max_speed if is_night else 100) ] | min %}{{ [ [ desired_speed | int(0), speed_floor ] | max, cap ] | min }}{% endif %}
 
+# Bind the optional MAX helper for the template triggers below. An OPTIONAL input
+# cannot be a state-trigger entity_id (an unset input fails to load), but it CAN be
+# referenced inside a template: unset -> renders to `none` -> template is always
+# false -> nothing tracked, never fires, blueprint still loads.
+trigger_variables:
+  force_max_entity: !input force_max_boolean
+
 trigger:
+  # Instant whole-house MAX, both edges (unset-safe; see trigger_variables above).
+  # A template trigger only fires on false->true, so we need one per edge: ON gives
+  # immediate 100; OFF immediately reclaims control (else the fan stays pinned at
+  # 100 until the next re-eval, up to the time_pattern interval).
+  - platform: template
+    value_template: >-
+      {{ force_max_entity not in [none, 'none', ''] and is_state(force_max_entity, 'on') }}
+  - platform: template
+    value_template: >-
+      {{ force_max_entity not in [none, 'none', ''] and is_state(force_max_entity, 'off') }}
   - platform: state
     entity_id: !input room_sensor
   - platform: state
@@ -433,7 +450,7 @@ trigger:
     entity_id: !input thermostat
     attribute: target_temp_low
   - platform: time_pattern
-    minutes: /10 # safety re-eval + night boundary rollover + optional-input pickup
+    minutes: /10 # safety re-eval + night boundary rollover + speed-floor pickup
 
 # Respect a manual OFF (baseline is always >0, so an off fan is a human signal).
 condition:

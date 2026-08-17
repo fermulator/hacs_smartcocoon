@@ -556,3 +556,70 @@ async def test_speed_scenario(
 ) -> None:
     """Drive the blueprint through one scenario and assert the commanded speed."""
     await _run_scenario(hass, calls, freezer, case)
+
+
+# --------------------------------------------------------------------------- #
+# Instant whole-house MAX hook: dedicated template triggers on the force_max
+# helper fire on the toggle itself (not a room-sensor change), so these are
+# separate from the scenario matrix. They also prove the unset-safe property:
+# with no force_max_boolean the blueprint must still load and never fire.
+# --------------------------------------------------------------------------- #
+_MAX_HELPER = "input_boolean.max"
+
+
+def _prime_idle(hass: HomeAssistant, fan_pct: int) -> None:
+    """Idle + room below setpoint -> desired baseline (8)."""
+    hass.states.async_set(
+        THERMOSTAT, "cool", {"hvac_action": "idle", "target_temp_high": 22.0}
+    )
+    hass.states.async_set(FAN, "on", {"percentage": fan_pct})
+    hass.states.async_set(ROOM, "20.0")
+
+
+async def test_instant_max_on_edge(
+    hass: HomeAssistant, calls: list[ServiceCall]
+) -> None:
+    """Turning the MAX helper ON commands 100 immediately (no room change)."""
+    await _setup(hass, {"force_max_boolean": _MAX_HELPER})
+    hass.states.async_set(_MAX_HELPER, "off")
+    _prime_idle(hass, fan_pct=8)
+    await hass.async_block_till_done()
+    calls.clear()
+
+    hass.states.async_set(_MAX_HELPER, "on")  # only change
+    await hass.async_block_till_done()
+    assert _last_pct(calls) == 100
+
+
+async def test_instant_max_off_edge(
+    hass: HomeAssistant, calls: list[ServiceCall]
+) -> None:
+    """Turning MAX OFF immediately reclaims the real speed (not stuck at 100)."""
+    await _setup(hass, {"force_max_boolean": _MAX_HELPER})
+    hass.states.async_set(_MAX_HELPER, "on")
+    _prime_idle(hass, fan_pct=100)
+    await hass.async_block_till_done()
+    calls.clear()
+
+    hass.states.async_set(_MAX_HELPER, "off")  # only change
+    await hass.async_block_till_done()
+    assert _last_pct(calls) == 8
+
+
+async def test_max_hook_unset_loads_and_is_quiet(
+    hass: HomeAssistant, calls: list[ServiceCall]
+) -> None:
+    """With force_max_boolean unset, the blueprint loads and never spuriously fires."""
+    await _setup(hass)  # no force_max_boolean
+    automations = hass.states.async_entity_ids("automation")
+    assert automations, "blueprint failed to load when force_max_boolean is unset"
+    state = hass.states.get(automations[0])
+    assert state is not None
+    assert state.state == "on"
+
+    _prime_idle(hass, fan_pct=8)
+    await hass.async_block_till_done()
+    calls.clear()
+    hass.states.async_set("input_boolean.unrelated", "on")
+    await hass.async_block_till_done()
+    assert len(calls) == 0
