@@ -4,6 +4,11 @@ This integration gives you a `fan.*` entity per SmartCocoon booster fan. That's 
 raw building block — this guide turns it into useful control, from one-line recipes to
 a full self-regulating room-climate blueprint.
 
+Everything here uses only standard Home Assistant entities (a `climate` thermostat and a
+temperature `sensor`), so it should work with **any** climate integration. It was
+developed and tested against **Ecobee** — see
+[Compatibility](#compatibility--read-this-first) for the one hard requirement.
+
 It progresses from simplest to most capable:
 
 1. [How the fan behaves in Home Assistant](#how-the-fan-behaves-in-home-assistant)
@@ -31,6 +36,55 @@ A few properties of the fan entity drive everything below:
   Assistant as the **sole writer** of a fan's speed — otherwise HA and the app fight.
 
 The current speed is exposed as the `percentage` attribute of the fan entity.
+
+### Speed & noise — why automate at all
+
+SmartCocoon booster fans trade airflow for noise, and that trade-off is the whole
+reason to automate rather than pick one fixed speed. A rough, anecdotal guide (trust
+your own ears / a dB meter over these numbers):
+
+- **8–16%** — a low, near-silent baseline. Prefer this to fully **OFF**: a powered-but-idle
+  booster fan sitting in a vent can restrict airflow more than the bare register, so a
+  quiet baseline that keeps air moving is usually better than off.
+- **~60%** — clearly audible but tolerable; many people accept it running, some even
+  overnight.
+- **100%** — **LOUD.** Excellent for fast recovery when a room is far off target, but not
+  something you want running continuously or while you sleep.
+
+Automating lets you live in the quiet baseline almost always, step up to ~60% when a
+room drifts, and only hit 100% for short, justified boosts — with **night caps** so a
+boost can't blast a bedroom awake.
+
+### You need a room temperature sensor
+
+Everything here is driven by **room** temperature vs. the thermostat setpoint, so an
+accurate per-room sensor is what makes it effective — without one the automations have
+nothing meaningful to act on. Good sources:
+
+- **Thermostat remote sensors** — Ecobee room sensors, Nest temperature sensors, etc.,
+  exposed as `sensor.*` in Home Assistant.
+- **Standalone sensors** — any Zigbee / Z-Wave / Wi-Fi temperature sensor
+  (`device_class: temperature`).
+
+**Can you use the SmartCocoon fan's own reading?** Not directly. This integration
+registers **only a `fan` entity — there is no dedicated SmartCocoon temperature
+`sensor`.** The fan does carry a `predicted_room_temperature` _attribute_, but (a) it's a
+SmartCocoon _estimate_ (see the `is_room_estimating` attribute), not a direct
+measurement, (b) it isn't always present, and (c) being an attribute rather than a
+`sensor` entity, you can't pick it in the blueprint's sensor selector. If you have
+nothing better, you _can_ wrap it in a template sensor — but a real sensor is strongly
+preferred:
+
+```yaml
+# configuration.yaml — last-resort room sensor from the fan's estimate
+template:
+  - sensor:
+      - name: "Bedroom Room Temp (SmartCocoon estimate)"
+        unit_of_measurement: "°C"
+        device_class: temperature
+        state: "{{ state_attr('fan.bedroom', 'predicted_room_temperature') | float(0) }}"
+        availability: "{{ state_attr('fan.bedroom', 'predicted_room_temperature') is not none }}"
+```
 
 ---
 
@@ -182,35 +236,40 @@ developed and tested against Ecobee.
 
 ### What it does — the speed tiers
 
+The blueprint works **symmetrically for cooling and heating** — a register booster pulls
+warm supply air into a cold room in winter just as it pulls cool air into a hot room in
+summer. "Demand" is how far the room is on the wrong side of the active setpoint:
+`room − cool_setpoint` while cooling, `heat_setpoint − room` while heating (positive =
+escalate). Each direction has its own on/off toggle (**Manage during cooling** /
+**Manage during heating**, both on by default).
+
 Every trigger, the blueprint computes a target speed and only re-commands the fan when
 the current speed is more than one step (>4%) off. From highest priority down:
 
-| Situation                                                       | Speed                                                  |
-| --------------------------------------------------------------- | ------------------------------------------------------ |
-| **Force-MAX** helper ON                                         | `100` (overrides everything, incl. a manually-off fan) |
-| Actively **cooling** and ≥ boost threshold over setpoint        | `boost_speed` (default 100)                            |
-| **Fan-only** (blower on, AC idle) and ≥ threshold over setpoint | `circulate_speed` (default 60)                         |
-| Actively **cooling**, within threshold, daytime                 | `assist_speed` (default 17)                            |
-| **HVAC-off equalizer** (see below)                              | 100 / 60 / 33 by room-vs-house delta                   |
-| Otherwise (idle / heating within range / night-suppressed)      | `baseline_speed` (default 8)                           |
-
-Heating stays at the baseline whisper unless you enable **Apply boost to heating too**.
+| Situation                                                    | Speed                                                  |
+| ------------------------------------------------------------ | ------------------------------------------------------ |
+| **Force-MAX** helper ON                                      | `100` (overrides everything, incl. a manually-off fan) |
+| Actively **heating/cooling** and demand ≥ boost threshold    | `boost_speed` (default 100)                            |
+| **Fan-only** (blower on, no active demand) and demand ≥ thr. | `circulate_speed` (default 60)                         |
+| Actively **heating/cooling**, within threshold, daytime      | `assist_speed` (default 17)                            |
+| **HVAC-off equalizer** (see below)                           | 100 / 60 / 33 by \|room − house\| delta                |
+| Otherwise (idle / within range / night-suppressed)           | `baseline_speed` (default 8)                           |
 
 ### The HVAC-off equalizer
 
-When cooling mode is **off** but the central blower is still circulating and you're home,
-there's no setpoint to chase — so instead the fan equalizes the room toward the _house's_
-current temperature (the thermostat's `current_temperature`, or a reference sensor you
-choose). Tiers on `(room − house)`:
+When the central blower is circulating with **no active heating/cooling demand** and
+you're home, there's no setpoint to chase — so instead the fan equalizes the room toward
+the _house's_ current temperature (the thermostat's `current_temperature`, or a reference
+sensor you choose), **in either direction**. Tiers on `|room − house|`:
 
 - `≥ 2.0 °C` → `100%`
 - `≥ 1.0 °C` → `60%`
 - `≥ 0.5 °C` → `33%`
 - else → baseline
 
-It can only move house-temperature air (it can't cool a room _below_ the house), and it
-respects the away flag and night suppression. Turn it off per room with **Enable HVAC-off
-equalizer**.
+It can only move house-temperature air (it can't push a room _past_ the house temp — no
+cooling below it in summer, no warming above it in winter), and it respects the away flag
+and night suppression. Turn it off per room with **Enable HVAC-off equalizer**.
 
 ### Importing the blueprint
 
@@ -226,12 +285,14 @@ https://github.com/davecpearce/hacs_smartcocoon/blob/main/blueprints/automation/
 > Blueprints bundled inside an integration repo are **not** auto-distributed by HACS —
 > import via the badge/URL above.
 
-### Per-room setup — two examples
+### Per-room setup — examples
 
 Create one automation per room from the blueprint. Only `thermostat`, `room_sensor`, and
-`booster_fan` are required; everything else has a sensible default.
+`booster_fan` are required; everything else has a sensible default. Both directions are
+managed by default — set `enable_cooling` / `enable_heating` to `false` to opt a room out
+of one.
 
-**Bedroom — night caps on (default):**
+**Bedroom — both directions, night caps on (default):**
 
 ```yaml
 use_blueprint:
@@ -255,6 +316,19 @@ use_blueprint:
     booster_fan: fan.office
     enable_night_suppression: false # you work/game late — keep assist/circulate active
     max_speed: 60 # full speed is too loud in here
+```
+
+**Cold back bedroom — heating only:**
+
+```yaml
+use_blueprint:
+  path: smartcocoon/room_climate_boost.yaml
+  input:
+    thermostat: climate.thermostat
+    room_sensor: sensor.back_bedroom_temperature
+    booster_fan: fan.back_bedroom
+    enable_cooling: false # this room only ever runs cold — boost on heating
+    enable_heating: true
 ```
 
 ### Companion helpers (optional)
@@ -303,5 +377,5 @@ use_blueprint:
   next re-evaluation — a room/thermostat state change or the periodic tick — **within
   ~10 minutes**. If you need instant response, drive the fan directly for that one action.
 - **Night caps.** With night suppression on, the assist/circulate/equalize tiers collapse
-  to baseline overnight; only an active-cooling boost may exceed baseline. Set
+  to baseline overnight; only an active heating/cooling boost may exceed baseline. Set
   `night_max_speed` low to prevent a nighttime boost from waking a bedroom.

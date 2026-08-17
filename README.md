@@ -126,9 +126,10 @@ If `entity_id` is omitted, the service operates on all fans.
 
 Out of the box the integration gives you a `fan.*` entity per fan. The
 [**Automations & Blueprints cookbook**](docs/AUTOMATIONS.md) turns that into useful
-control — from one-line recipes (boost a hot room, quiet overnight, all vents off when
-away) up to a full self-regulating **Room Climate Boost** blueprint that drives a room's
-booster fan off your thermostat's `hvac_action` and a room temperature sensor.
+control — from one-line recipes (boost a hot or cold room, quiet overnight, all vents off
+when away) up to a full self-regulating **Room Climate Boost** blueprint that drives a
+room's booster fan off your thermostat's `hvac_action` and a room temperature sensor,
+symmetrically for **cooling and heating**.
 
 Import the blueprint (works with any `climate` entity that reports `hvac_action`;
 developed and tested against Ecobee):

@@ -2,7 +2,10 @@ blueprint:
   name: SmartCocoon Room Climate Boost
   description: >-
     Automatic, self-regulating booster-fan control for one room, driven by the
-    thermostat's hvac_action + a room-sensor delta vs. the cool setpoint.
+    thermostat's hvac_action + a room-sensor delta vs. the relevant setpoint.
+    Symmetric: the same tier ladder serves BOTH cooling and heating (a register
+    booster pulls warm supply air into a cold room just as it pulls cool air in
+    summer). Enable each direction independently.
 
     COMPATIBILITY: works with any `climate` entity that reports `hvac_action`
     plus setpoints (`temperature` and/or `target_temp_high`/`target_temp_low`)
@@ -10,35 +13,37 @@ blueprint:
     that the thermostat report `hvac_action` — some integrations only report the
     mode. Developed and tested against Ecobee.
 
-      * room >= boost_threshold over cool setpoint:
-          - actively cooling  -> boost_speed  (cold air in duct, max recovery)
-          - fan-only (blower)  -> circulate_speed  (neutral air, equalize; 0=off)
-      * actively cooling, within threshold, daytime -> assist_speed
-      * HVAC OFF + blower on + home + room warmer than the house -> EQUALIZE
-        (see below)
-      * otherwise (fan-only/idle/heating within range) -> baseline_speed
-      * heating: baseline whisper unless enable_heating_boost
+    "Demand" = how far the room is on the wrong side of the active setpoint:
+    room-minus-cool_setpoint while cooling, heat_setpoint-minus-room while
+    heating (positive = escalate).
+
+      * demand >= boost_threshold:
+          - actively heating/cooling -> boost_speed  (max recovery)
+          - fan-only (blower)        -> circulate_speed  (0 = off)
+      * actively heating/cooling, within threshold, daytime -> assist_speed
+      * blower on, no active demand, home -> EQUALIZE toward the house (see below)
+      * otherwise (idle / within range) -> baseline_speed
       * force_max boolean ON -> 100% override (bypasses EVERYTHING, incl. manual OFF)
 
-    HVAC-OFF EQUALIZER: when there is no cool setpoint (cooling mode off) but the
-    central blower is still circulating and you're home, there is nothing to
-    "chase" — so instead the fan equalizes the room toward the HOUSE's own
-    current temperature (thermostat current_temperature, or a chosen reference
-    sensor). Tiers on (room - house):
+    Set enable_cooling / enable_heating to manage only one direction.
+
+    HVAC-OFF EQUALIZER: when the central blower is circulating with no active
+    heating/cooling demand and you're home, the fan equalizes the room toward the
+    HOUSE's own current temperature (thermostat current_temperature, or a chosen
+    reference sensor), in EITHER direction. Tiers on |room - house|:
       >= 2.0C -> 100% | >= 1.0C -> 60% | >= 0.5C -> 33% | else baseline.
-    It can only move house-temperature air (can't cool below the house), and is
-    gated by the away flag + night suppression. Set enable_equalize off to
+    It can only move house-temperature air (can't push past the house temp), and
+    is gated by the away flag + night suppression. Set enable_equalize off to
     disable per room.
 
-    Fan-only (AC on but idle) uses the cool setpoint as the reference. Speed
-    control is PERCENTAGE-ONLY (the only reliable lever; preset_mode is never
-    used). Speeds are tunable percentage defaults — the SmartCocoon integration
-    exposes 0-100 continuous and the hardware rounds to its nearest physical
-    step. At night, the assist + circulate + equalize tiers collapse to baseline
-    for constant sleep noise (per-room: disable via enable_night_suppression =
-    false, e.g. a home office used late in the evening). Only an active-cooling
-    boost may exceed baseline at night. A manually-off fan is respected unless
-    Force manage.
+    Speed control is PERCENTAGE-ONLY (the only reliable lever; preset_mode is
+    never used). Speeds are tunable percentage defaults — the SmartCocoon
+    integration exposes 0-100 continuous and the hardware rounds to its nearest
+    physical step. At night, the assist + circulate + equalize tiers collapse to
+    baseline for constant sleep noise (per-room: disable via
+    enable_night_suppression = false, e.g. a home office used late in the
+    evening). Only an active heating/cooling boost may exceed baseline at night.
+    A manually-off fan is respected unless Force manage.
   domain: automation
   source_url: https://github.com/davecpearce/hacs_smartcocoon/blob/main/blueprints/automation/smartcocoon/room_climate_boost.yaml
   homeassistant:
@@ -99,8 +104,8 @@ blueprint:
           step: 1
           mode: box
     assist_speed:
-      name: Cooling assist speed (%, daytime only)
-      description: Gentle daytime nudge while actively cooling and within the boost threshold. Suppressed at night.
+      name: Assist speed (%, daytime only)
+      description: Gentle daytime nudge while actively heating/cooling and within the boost threshold. Suppressed at night.
       default: 17
       selector:
         number:
@@ -112,8 +117,8 @@ blueprint:
       name: Fan-only circulate speed (%, 0 = off)
       description: >-
         DEFAULT 60 (on). Runs this speed in fan-only mode when the room is
-        >= boost_threshold above setpoint — pulls cooler house air into a hot
-        spot (equalizer; can't cool below house temp). Set 0 to opt a room OUT.
+        >= boost_threshold on the wrong side of the setpoint — pulls
+        house air into a hot (or cold) spot. Set 0 to opt a room OUT.
         Suppressed at night.
       default: 60
       selector:
@@ -125,9 +130,9 @@ blueprint:
     boost_speed:
       name: Boost speed (%, 0 = off)
       description: >-
-        Turbo recovery while actively cooling and beyond the threshold. Applies
-        day and night. Set 0 to disable turbo for this room (it falls back to
-        assist/baseline even when far off target).
+        Turbo recovery while actively heating/cooling and beyond the threshold.
+        Applies day and night. Set 0 to disable turbo for this room (it falls
+        back to assist/baseline even when far off target).
       default: 100
       selector:
         number:
@@ -226,10 +231,24 @@ blueprint:
       selector:
         entity:
           domain: input_boolean
-    enable_heating_boost:
-      name: Apply boost to heating too
-      description: Default OFF (heating = baseline whisper). ON = boost when actively heating and >= threshold below the heat setpoint.
-      default: false
+    enable_cooling:
+      name: Manage during cooling
+      description: >-
+        Default ON. Run the boost / circulate / assist tiers when the thermostat
+        is cooling (or fan-only with the room above the cool setpoint). Turn OFF
+        to leave the fan at baseline during cooling.
+      default: true
+      selector:
+        boolean: {}
+    enable_heating:
+      name: Manage during heating
+      description: >-
+        Default ON. Mirror the cooling tiers for heating: boost / circulate /
+        assist when the thermostat is heating (or fan-only with the room below
+        the heat setpoint) — a register booster pulls warm supply air into a cold
+        room just as it pulls cool air in summer. Turn OFF to leave the fan at
+        baseline during heating.
+      default: true
       selector:
         boolean: {}
     force_manage:
@@ -287,7 +306,8 @@ variables:
   enable_equalize: !input enable_equalize
   equalize_reference_sensor: !input equalize_reference_sensor
   away_boolean: !input away_boolean
-  enable_heating_boost: !input enable_heating_boost
+  enable_cooling: !input enable_cooling
+  enable_heating: !input enable_heating
   force_manage: !input force_manage
   force_max_boolean: !input force_max_boolean
   speed_floor_entity: !input speed_floor_entity
@@ -315,45 +335,73 @@ variables:
     {% if hi is not none %}{{ hi }}
     {% elif states(thermostat) == 'cool' and s is not none %}{{ s }}
     {% else %}{{ none }}{% endif %}
-  # Cooling-side delta: how far the room is ABOVE the cool setpoint (positive = hot).
-  delta: >-
+  # Heat setpoint: target_temp_low (heat_cool/auto) else temperature (heat mode).
+  heat_sp: >-
+    {% set lo = state_attr(thermostat, 'target_temp_low') %}
+    {% set s = state_attr(thermostat, 'temperature') %}
+    {% if lo is not none %}{{ lo }}
+    {% elif states(thermostat) == 'heat' and s is not none %}{{ s }}
+    {% else %}{{ none }}{% endif %}
+  # Cooling-side demand: how far the room is ABOVE the cool setpoint (positive = too hot).
+  cool_demand: >-
     {% set room = states(room_sensor) | float(none) %}
     {% set c = cool_sp | float(none) %}
     {% if room is none or c is none %}{{ none }}{% else %}{{ room - c }}{% endif %}
-  # Heating-side delta (only used when enable_heating_boost): how far BELOW heat setpoint.
-  heat_delta: >-
+  # Heating-side demand: how far the room is BELOW the heat setpoint (positive = too cold).
+  heat_demand: >-
     {% set room = states(room_sensor) | float(none) %}
-    {% set lo = state_attr(thermostat, 'target_temp_low') %}
-    {% set s = state_attr(thermostat, 'temperature') %}
-    {% set h = (lo if lo is not none else (s if states(thermostat) == 'heat' else none)) | float(none) %}
+    {% set h = heat_sp | float(none) %}
     {% if room is none or h is none %}{{ none }}{% else %}{{ h - room }}{% endif %}
-  # Final target speed.
+  # Final target speed. Symmetric: the same boost/circulate/assist ladder serves
+  # cooling and heating -- only the setpoint side (and its enable toggle) differ.
   desired_speed: >-
     {% set act = state_attr(thermostat, 'hvac_action') %}
     {% set cooling = act == 'cooling' %}
     {% set heating = act == 'heating' %}
-    {% set blower_on = act in ['cooling', 'fan'] %}
+    {% set blower_on = act in ['cooling', 'heating', 'fan'] %}
     {% set pct = state_attr(booster_fan, 'percentage') | int(0) %}
-    {% set high_speed = boost_speed if cooling else circulate_speed %}
+    {# Pick the active service's demand + enable toggle. When only the blower is
+       running (fan-only), use whichever setpoint the room is on the wrong side of. #}
+    {% if cooling %}
+      {% set demand = cool_demand %}
+      {% set service_ok = enable_cooling %}
+    {% elif heating %}
+      {% set demand = heat_demand %}
+      {% set service_ok = enable_heating %}
+    {% else %}
+      {% set cool_ok = enable_cooling and (cool_sp is not none) and (cool_demand is not none) %}
+      {% set heat_ok = enable_heating and (heat_sp is not none) and (heat_demand is not none) %}
+      {% if cool_ok and (not heat_ok or (cool_demand >= heat_demand)) %}
+        {% set demand = cool_demand %}
+        {% set service_ok = true %}
+      {% elif heat_ok %}
+        {% set demand = heat_demand %}
+        {% set service_ok = true %}
+      {% else %}
+        {% set demand = none %}
+        {% set service_ok = false %}
+      {% endif %}
+    {% endif %}
+    {% set active = cooling or heating %}
+    {% set high_speed = boost_speed if active else circulate_speed %}
     {% set currently_high = high_speed > 0 and pct >= (high_speed - 4) %}
-    {% set want_high = (delta is not none) and blower_on and high_speed > 0
-                       and (delta > release_threshold if currently_high else delta >= boost_threshold) %}
-    {# HVAC-off equalizer: no cool setpoint, blower circulating, home, not night-suppressed #}
+    {% set want_high = service_ok and (demand is not none) and blower_on and high_speed > 0
+                       and (demand > release_threshold if currently_high else demand >= boost_threshold) %}
+    {# HVAC-off/idle equalizer: blower circulating with no active service demand ->
+       equalize toward the house temperature in EITHER direction (abs delta). #}
     {% set ref_sensor = equalize_reference_sensor %}
     {% set house = (states(ref_sensor) | float(none)) if ref_sensor not in [none, 'none', ''] else (state_attr(thermostat, 'current_temperature') | float(none)) %}
     {% set room2 = states(room_sensor) | float(none) %}
-    {% set eq_delta = (room2 - house) if (house is not none and room2 is not none) else none %}
-    {% set equalize_active = enable_equalize and (cool_sp is none) and blower_on and home_ok
+    {% set eq_delta = (room2 - house) | abs if (house is not none and room2 is not none) else none %}
+    {% set equalize_active = enable_equalize and blower_on and home_ok
                              and (not suppress_night) and (eq_delta is not none) %}
     {% if force_max %}
       100
-    {% elif heating and enable_heating_boost and boost_speed > 0 and heat_delta is not none and heat_delta >= boost_threshold %}
-      {{ boost_speed }}
-    {% elif want_high and cooling %}
+    {% elif want_high and active %}
       {{ boost_speed }}
     {% elif want_high and not suppress_night %}
       {{ circulate_speed }}
-    {% elif cooling and not suppress_night %}
+    {% elif service_ok and active and not suppress_night %}
       {{ assist_speed }}
     {% elif equalize_active and eq_delta >= 2.0 %}
       100

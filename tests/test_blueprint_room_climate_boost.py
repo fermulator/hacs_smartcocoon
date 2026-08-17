@@ -414,14 +414,142 @@ async def test_release_steps_down_below_release_threshold(
 
 
 # --------------------------------------------------------------------------- #
-# Current cooling-bias: heating gets only the baseline whisper. This expectation
-# is intentionally flipped by the symmetric-heating refactor.
+# Heating tier ladder (symmetric with cooling).
 # --------------------------------------------------------------------------- #
-async def test_heating_is_baseline_only_today(
+async def test_heating_boost(
     hass: HomeAssistant, calls: list[ServiceCall], freezer: FrozenDateTimeFactory
 ) -> None:
-    """Actively heating, room below heat setpoint -> baseline (current bias)."""
+    """Actively heating and >= boost threshold below setpoint -> boost (100)."""
     await _setup(hass)
+    await _trigger(
+        hass,
+        calls,
+        freezer,
+        mode="heat",
+        hvac_action="heating",
+        target_temp_low=21.0,
+        room=19.0,  # 2.0 below heat setpoint
+    )
+    assert _last_pct(calls) == 100
+
+
+async def test_heating_assist_daytime(
+    hass: HomeAssistant, calls: list[ServiceCall], freezer: FrozenDateTimeFactory
+) -> None:
+    """Heating within threshold, daytime -> assist (17)."""
+    await _setup(hass)
+    await _trigger(
+        hass,
+        calls,
+        freezer,
+        mode="heat",
+        hvac_action="heating",
+        target_temp_low=21.0,
+        room=20.5,  # 0.5 below setpoint, within boost threshold
+    )
+    assert _last_pct(calls) == 17
+
+
+async def test_fan_only_circulate_heating(
+    hass: HomeAssistant, calls: list[ServiceCall], freezer: FrozenDateTimeFactory
+) -> None:
+    """Fan-only, room below heat setpoint -> circulate (60)."""
+    await _setup(hass)
+    await _trigger(
+        hass,
+        calls,
+        freezer,
+        mode="heat",  # cool_sp is None; heat_sp comes from target_temp_low
+        hvac_action="fan",
+        target_temp_low=21.0,
+        room=19.0,
+    )
+    assert _last_pct(calls) == 60
+
+
+async def test_night_still_allows_heating_boost(
+    hass: HomeAssistant, calls: list[ServiceCall], freezer: FrozenDateTimeFactory
+) -> None:
+    """At night, an active-heating boost is still allowed."""
+    await _setup(hass)
+    await _trigger(
+        hass,
+        calls,
+        freezer,
+        when=_NIGHT,
+        mode="heat",
+        hvac_action="heating",
+        target_temp_low=21.0,
+        room=19.0,
+    )
+    assert _last_pct(calls) == 100
+
+
+async def test_night_suppresses_heating_assist(
+    hass: HomeAssistant, calls: list[ServiceCall], freezer: FrozenDateTimeFactory
+) -> None:
+    """At night, heating-within-threshold collapses to baseline."""
+    await _setup(hass)
+    await _trigger(
+        hass,
+        calls,
+        freezer,
+        when=_NIGHT,
+        mode="heat",
+        hvac_action="heating",
+        target_temp_low=21.0,
+        room=20.5,
+    )
+    assert _last_pct(calls) == 8
+
+
+# --------------------------------------------------------------------------- #
+# Bidirectional equalizer: room COLDER than the house pulls warm air in too.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(  # type: ignore[untyped-decorator]
+    ("room", "expected"),
+    [(19.9, 100), (20.8, 60), (21.4, 33), (21.8, 8)],
+)
+async def test_equalizer_tiers_room_colder_than_house(
+    hass: HomeAssistant,
+    calls: list[ServiceCall],
+    freezer: FrozenDateTimeFactory,
+    room: float,
+    expected: int,
+) -> None:
+    """No setpoint, blower circulating, home: equalize a cold room toward the house."""
+    await _setup(hass)
+    await _trigger(
+        hass,
+        calls,
+        freezer,
+        mode="fan_only",
+        hvac_action="fan",
+        current_temperature=22.0,  # house is warmer than the room
+        room=room,
+    )
+    assert _last_pct(calls) == expected
+
+
+# --------------------------------------------------------------------------- #
+# Enable toggles gate each direction.
+# --------------------------------------------------------------------------- #
+async def test_enable_cooling_false_leaves_baseline(
+    hass: HomeAssistant, calls: list[ServiceCall], freezer: FrozenDateTimeFactory
+) -> None:
+    """With cooling management off, an otherwise-boost case stays at baseline."""
+    await _setup(hass, {"enable_cooling": False})
+    await _trigger(
+        hass, calls, freezer, hvac_action="cooling", target_temp_high=22.0, room=24.0
+    )
+    assert _last_pct(calls) == 8
+
+
+async def test_enable_heating_false_leaves_baseline(
+    hass: HomeAssistant, calls: list[ServiceCall], freezer: FrozenDateTimeFactory
+) -> None:
+    """With heating management off, an otherwise-boost case stays at baseline."""
+    await _setup(hass, {"enable_heating": False})
     await _trigger(
         hass,
         calls,
