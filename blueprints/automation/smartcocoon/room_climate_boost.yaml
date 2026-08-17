@@ -300,11 +300,14 @@ variables:
   suppress_night: >-
     {{ is_night and enable_night_suppression }}
   # Home check for the equalizer: away_boolean ON = away = pause. Unset = always home.
+  # NB: emit a real boolean (Jinja true/false render to "True"/"False", which HA
+  # parses back to bool) -- a hardcoded lowercase "true"/"false" stays a truthy
+  # STRING and breaks `{% if %}` / condition logic when the input is unset.
   home_ok: >-
-    {% if away_boolean in [none, 'none', ''] %}true{% else %}{{ is_state(away_boolean, 'off') }}{% endif %}
+    {{ is_state(away_boolean, 'off') if away_boolean not in [none, 'none', ''] else true }}
   # Global MAX override: when the force_max boolean is ON, blast to 100% over everything.
   force_max: >-
-    {% if force_max_boolean in [none, 'none', ''] %}false{% else %}{{ is_state(force_max_boolean, 'on') }}{% endif %}
+    {{ is_state(force_max_boolean, 'on') if force_max_boolean not in [none, 'none', ''] else false }}
   # Cool setpoint: target_temp_high (heat_cool/auto) else temperature (cool mode).
   cool_sp: >-
     {% set hi = state_attr(thermostat, 'target_temp_high') %}
